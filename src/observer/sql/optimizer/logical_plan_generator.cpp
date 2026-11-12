@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 #include "sql/optimizer/logical_plan_generator.h"
 
 #include "common/log/log.h"
+#include "sql/operator/order_by_logical_operator.h"
 
 #include "sql/operator/calc_logical_operator.h"
 #include "sql/operator/delete_logical_operator.h"
@@ -39,6 +40,56 @@ See the Mulan PSL v2 for more details. */
 
 using namespace std;
 using namespace common;
+
+namespace {
+// Flatten integer addition only: floating-point reassociation changes rounding.
+void integer_add_terms(Expression &expr, vector<Expression *> &terms)
+{
+  if (expr.type() == ExprType::ARITHMETIC && expr.pos() == -1 &&
+      expr.value_type() == AttrType::INTS &&
+      static_cast<ArithmeticExpr &>(expr).arithmetic_type() == ArithmeticExpr::Type::ADD) {
+    auto &addition = static_cast<ArithmeticExpr &>(expr);
+    integer_add_terms(*addition.left(), terms);
+    integer_add_terms(*addition.right(), terms);
+  } else {
+    terms.push_back(&expr);
+  }
+}
+
+// Bind repeated group sums despite parser associativity, e.g. a+b+a+b.
+bool bind_repeated_group_sum(unique_ptr<Expression> &expr, Expression &group, int position)
+{
+  if (expr->value_type() != AttrType::INTS || group.value_type() != AttrType::INTS) return false;
+  vector<Expression *> terms, group_terms;
+  integer_add_terms(*expr, terms);
+  integer_add_terms(group, group_terms);
+  if (group_terms.size() < 2 || terms.size() <= group_terms.size() ||
+      terms.size() % group_terms.size() != 0) return false;
+  const size_t repeats = terms.size() / group_terms.size();
+  vector<bool> used(terms.size(), false);
+  for (size_t repeat = 0; repeat < repeats; ++repeat) {
+    for (Expression *term : group_terms) {
+      size_t j = 0;
+      for (; j < terms.size(); ++j) {
+        if (!used[j] && term->equal(*terms[j])) { used[j] = true; break; }
+      }
+      if (j == terms.size()) return false;
+    }
+  }
+  const string name = expr->name();
+  unique_ptr<Expression> result;
+  for (size_t repeat = 0; repeat < repeats; ++repeat) {
+    auto item = group.copy();
+    item->set_name(group.name());
+    item->set_pos(position);
+    if (!result) result = std::move(item);
+    else result = make_unique<ArithmeticExpr>(ArithmeticExpr::Type::ADD, std::move(result), std::move(item));
+  }
+  result->set_name(name);
+  expr = std::move(result);
+  return true;
+}
+}
 
 RC LogicalPlanGenerator::create(Stmt *stmt, unique_ptr<LogicalOperator> &logical_operator)
 {
@@ -108,6 +159,7 @@ RC LogicalPlanGenerator::create_plan(SelectStmt *select_stmt, unique_ptr<Logical
       table_oper = std::move(table_get_oper);
     } else {
       JoinLogicalOperator *join_oper = new JoinLogicalOperator;
+      join_oper->add_predicate_op(predicate_oper.get());
       join_oper->add_child(std::move(table_oper));
       join_oper->add_child(std::move(table_get_oper));
       table_oper = unique_ptr<LogicalOperator>(join_oper);
@@ -138,12 +190,25 @@ RC LogicalPlanGenerator::create_plan(SelectStmt *select_stmt, unique_ptr<Logical
     last_oper = &group_by_oper;
   }
 
+  unique_ptr<LogicalOperator> order_oper;
+  if (!select_stmt->order_by().empty()) {
+    order_oper = make_unique<OrderByLogicalOperator>(std::move(select_stmt->order_by()));
+    order_oper->add_child(std::move(*last_oper));
+    last_oper = &order_oper;
+  }
+
   unique_ptr<LogicalOperator> project_oper = make_unique<ProjectLogicalOperator>(std::move(select_stmt->query_expressions()));
   if (*last_oper) {
     project_oper->add_child(std::move(*last_oper));
   }
 
   last_oper = &project_oper;
+  unique_ptr<LogicalOperator> limit_oper;
+  if (select_stmt->limit() >= 0) {
+    limit_oper = make_unique<LimitLogicalOperator>(select_stmt->limit(), select_stmt->offset());
+    limit_oper->add_child(std::move(*last_oper));
+    last_oper = &limit_oper;
+  }
 
   logical_operator = std::move(*last_oper);
   return RC::SUCCESS;
@@ -296,19 +361,16 @@ RC LogicalPlanGenerator::create_group_by_plan(SelectStmt *select_stmt, unique_pt
   };
 
   function<RC(unique_ptr<Expression>&)> bind_group_by_expr = [&](unique_ptr<Expression> &expr) -> RC {
-    RC rc = RC::SUCCESS;
+    if (expr->type() == ExprType::AGGREGATION || expr->pos() != -1) return RC::SUCCESS;
     for (size_t i = 0; i < group_by_expressions.size(); i++) {
       auto &group_by = group_by_expressions[i];
-      if (expr->type() == ExprType::AGGREGATION) {
-        break;
-      } else if (expr->equal(*group_by)) {
+      if (expr->equal(*group_by)) {
         expr->set_pos(i);
-        continue;
-      } else {
-        rc = ExpressionIterator::iterate_child_expr(*expr, bind_group_by_expr);
+        return RC::SUCCESS;
       }
+      if (bind_repeated_group_sum(expr, *group_by, i)) return RC::SUCCESS;
     }
-    return rc;
+    return ExpressionIterator::iterate_child_expr(*expr, bind_group_by_expr);
   };
 
  bool found_unbound_column = false;
@@ -338,6 +400,12 @@ RC LogicalPlanGenerator::create_group_by_plan(SelectStmt *select_stmt, unique_pt
   // collect all aggregate expressions
   for (unique_ptr<Expression> &expression : query_expressions) {
     collector(expression);
+  }
+
+  for (auto &item : select_stmt->order_by()) {
+    bind_group_by_expr(item.expression);
+    find_unbound_column(item.expression);
+    collector(item.expression);
   }
 
   if (group_by_expressions.empty() && aggregate_expressions.empty()) {

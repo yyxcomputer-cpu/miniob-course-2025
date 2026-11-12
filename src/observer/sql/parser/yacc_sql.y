@@ -68,6 +68,12 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
         CREATE
         DROP
         GROUP
+        INNER
+        JOIN
+        ORDER
+        ASC
+        LIMIT
+        OFFSET
         TABLE
         TABLES
         INDEX
@@ -137,8 +143,16 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
   char *                                     cstring;
   int                                        number;
   float                                      floats;
+  RelationListSqlNode *                       from_list;
+  OrderBySqlNode *                            order_item;
+  vector<OrderBySqlNode> *                    order_list;
+  pair<int, int> *                            limit_spec;
 }
 
+%destructor { delete $$; } <from_list>
+%destructor { delete $$; } <order_item>
+%destructor { delete $$; } <order_list>
+%destructor { delete $$; } <limit_spec>
 %destructor { delete $$; } <condition>
 %destructor { delete $$; } <value>
 %destructor { delete $$; } <rel_attr>
@@ -148,7 +162,7 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
 %destructor { delete $$; } <value_list>
 %destructor { delete $$; } <condition_list>
 // %destructor { delete $$; } <rel_attr_list>
-%destructor { delete $$; } <relation_list>
+
 %destructor { delete $$; } <key_list>
 
 %token <number> NUMBER
@@ -158,9 +172,13 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
 //非终结符
 
 /** type 定义了各种解析后的结果输出的是什么类型。类型对应了 union 中的定义的成员变量名称 **/
+%type <order_item>          order_item
+%type <order_list>          order_by order_list
+%type <number>              order_direction
+%type <limit_spec>          limit_clause
 %type <number>              type
 %type <condition>           condition
-%type <value>               value
+%type <value>               value signed_value
 %type <number>              number
 %type <cstring>             relation
 %type <comp>                comp_op
@@ -173,7 +191,8 @@ UnboundAggregateExpr *create_aggregate_expression(const char *aggregate_name,
 %type <cstring>             storage_format
 %type <key_list>            primary_key
 %type <key_list>            attr_list
-%type <relation_list>       rel_list
+%type <from_list>           rel_list
+%type <condition_list>      join_conditions
 %type <expression>          expression
 %type <expression>          aggregate_expression
 %type <expression_list>     expression_list
@@ -327,7 +346,7 @@ create_table_stmt:    /*create table 语句的语法解析树*/
       $$ = new ParsedSqlNode(SCF_CREATE_TABLE);
       CreateTableSqlNode &create_table = $$->create_table;
       create_table.relation_name = $3;
-      //free($3);
+      //
 
       create_table.attr_infos.swap(*$5);
       delete $5;
@@ -420,17 +439,22 @@ insert_stmt:        /*insert   语句的语法解析树*/
     ;
 
 value_list:
-    value
+    signed_value
     {
       $$ = new vector<Value>;
       $$->emplace_back(*$1);
       delete $1;
     }
-    | value_list COMMA value { 
+    | value_list COMMA signed_value {
       $$ = $1;
       $$->emplace_back(*$3);
       delete $3;
     }
+    ;
+signed_value:
+    value { $$ = $1; }
+    | '-' NUMBER { $$ = new Value(-$2); }
+    | '-' FLOAT { $$ = new Value(-$2); }
     ;
 value:
     NUMBER {
@@ -483,7 +507,7 @@ update_stmt:      /*  update 语句的语法解析树*/
     }
     ;
 select_stmt:        /*  select 语句的语法解析树*/
-    SELECT expression_list FROM rel_list where group_by
+    SELECT expression_list FROM rel_list where group_by order_by limit_clause
     {
       $$ = new ParsedSqlNode(SCF_SELECT);
       if ($2 != nullptr) {
@@ -492,12 +516,13 @@ select_stmt:        /*  select 语句的语法解析树*/
       }
 
       if ($4 != nullptr) {
-        $$->selection.relations.swap(*$4);
+        $$->selection.relations.swap($4->relations);
+        $$->selection.conditions.swap($4->conditions);
         delete $4;
       }
 
       if ($5 != nullptr) {
-        $$->selection.conditions.swap(*$5);
+        $$->selection.conditions.insert($$->selection.conditions.end(), $5->begin(), $5->end());
         delete $5;
       }
 
@@ -505,6 +530,52 @@ select_stmt:        /*  select 语句的语法解析树*/
         $$->selection.group_by.swap(*$6);
         delete $6;
       }
+      if ($7) {
+        $$->selection.order_by.swap(*$7);
+        delete $7;
+      }
+      $$->selection.limit = $8->first;
+      $$->selection.offset = $8->second;
+      delete $8;
+    }
+    ;
+order_by:
+    /* empty */ { $$ = nullptr; }
+    | ORDER BY order_list { $$ = $3; }
+    ;
+order_list:
+    order_item {
+      $$ = new vector<OrderBySqlNode>;
+      $$->push_back(std::move(*$1)); delete $1;
+    }
+    | order_list COMMA order_item {
+      $$ = $1; $$->push_back(std::move(*$3)); delete $3;
+    }
+    ;
+order_item:
+    expression order_direction {
+      $$ = new OrderBySqlNode;
+      $$->expression.reset($1); $$->ascending = $2;
+    }
+    ;
+order_direction:
+    /* empty */ { $$ = 1; }
+    | ASC { $$ = 1; }
+    | DESC { $$ = 0; }
+    ;
+limit_clause:
+    /* empty */ { $$ = new pair<int, int>(-1, 0); }
+    | LIMIT NUMBER {
+      if ($2 < 0) { yyerror(&@2, sql_string, sql_result, scanner, "negative LIMIT"); YYERROR; }
+      $$ = new pair<int, int>($2, 0);
+    }
+    | LIMIT NUMBER OFFSET NUMBER {
+      if ($2 < 0 || $4 < 0) { yyerror(&@2, sql_string, sql_result, scanner, "negative LIMIT or OFFSET"); YYERROR; }
+      $$ = new pair<int, int>($2, $4);
+    }
+    | LIMIT NUMBER COMMA NUMBER {
+      if ($2 < 0 || $4 < 0) { yyerror(&@2, sql_string, sql_result, scanner, "negative LIMIT or OFFSET"); YYERROR; }
+      $$ = new pair<int, int>($4, $2);
     }
     ;
 calc_stmt:
@@ -596,17 +667,26 @@ relation:
     ;
 rel_list:
     relation {
-      $$ = new vector<string>();
-      $$->push_back($1);
-    }
-    | relation COMMA rel_list {
-      if ($3 != nullptr) {
-        $$ = $3;
-      } else {
-        $$ = new vector<string>;
-      }
+      $$ = new RelationListSqlNode;
+      $$->relations.push_back($1);
 
-      $$->insert($$->begin(), $1);
+    }
+    | rel_list COMMA relation {
+      $$ = $1; $$->relations.push_back($3);
+    }
+    | rel_list INNER JOIN relation ON join_conditions {
+      $$ = $1; $$->relations.push_back($4);
+      $$->conditions.insert($$->conditions.end(), $6->begin(), $6->end());
+      delete $6;
+    }
+    ;
+join_conditions:
+    condition {
+      $$ = new vector<ConditionSqlNode>;
+      $$->push_back(*$1); delete $1;
+    }
+    | join_conditions AND condition {
+      $$ = $1; $$->push_back(*$3); delete $3;
     }
     ;
 
@@ -636,7 +716,7 @@ condition_list:
     }
     ;
 condition:
-    rel_attr comp_op value
+    rel_attr comp_op signed_value
     {
       $$ = new ConditionSqlNode;
       $$->left_is_attr = 1;
@@ -648,7 +728,7 @@ condition:
       delete $1;
       delete $3;
     }
-    | value comp_op value 
+    | signed_value comp_op signed_value
     {
       $$ = new ConditionSqlNode;
       $$->left_is_attr = 0;
@@ -672,7 +752,7 @@ condition:
       delete $1;
       delete $3;
     }
-    | value comp_op rel_attr
+    | signed_value comp_op rel_attr
     {
       $$ = new ConditionSqlNode;
       $$->left_is_attr = 0;
@@ -718,12 +798,12 @@ load_data_stmt:
       $$->load_data.file_name = tmp_file_name;
       if ($8 != nullptr) {
         char *tmp = common::substr($8,1,strlen($8)-2);
-        $$->load_data.terminated = $8;
+        $$->load_data.terminated = tmp;
         free(tmp);
       }
       if ($9 != nullptr) {
         char *tmp = common::substr($9,1,strlen($9)-2);
-        $$->load_data.enclosed = $9;
+        $$->load_data.enclosed = tmp;
         free(tmp);
       }
       free(tmp_file_name);

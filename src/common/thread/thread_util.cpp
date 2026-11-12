@@ -27,6 +27,9 @@ int thread_set_name(const char *name)
   return pthread_setname_np(buf);
 #elif __linux__
   return pthread_setname_np(pthread_self(), buf);
+#else
+  // Platforms without a thread naming API still need a defined return value.
+  return 0;
 #endif
 }
 

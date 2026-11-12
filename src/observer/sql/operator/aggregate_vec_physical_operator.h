@@ -11,6 +11,7 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 
 #include "sql/operator/physical_operator.h"
+#include "sql/expr/aggregate_state.h"
 
 /**
  * @brief 聚合物理算子 (Vectorized)
@@ -39,25 +40,27 @@ private:
   public:
     AggregateValues() = default;
 
-    void insert(void *aggr_value) { data_.push_back(aggr_value); }
+    void insert(void *aggr_value, AggregateExpr::Type type) { data_.push_back(aggr_value); types_.push_back(type); }
 
     void *at(size_t index)
     {
-      ASSERT(index <= data_.size(), "index out of range");
+      ASSERT(index < data_.size(), "index out of range");
       return data_[index];
     }
 
     size_t size() { return data_.size(); }
-    ~AggregateValues()
+    void clear()
     {
-      for (auto &aggr_value : data_) {
-        free(aggr_value);
-        aggr_value = nullptr;
-      }
+      for (size_t i = 0; i < data_.size(); ++i)
+        destroy_aggregate_state(data_[i], types_[i]);
+      data_.clear();
+      types_.clear();
     }
+    ~AggregateValues() { clear(); }
 
   private:
     vector<void *> data_;
+    vector<AggregateExpr::Type> types_;
   };
   vector<Expression *> aggregate_expressions_;  /// 聚合表达式
   vector<Expression *> value_expressions_;

@@ -35,7 +35,7 @@ AggregateVecPhysicalOperator::AggregateVecPhysicalOperator(vector<Expression *> 
     auto *aggregate_expr = static_cast<AggregateExpr *>(expr);
     void *state_ptr = create_aggregate_state(aggregate_expr->aggregate_type(), aggregate_expr->child()->value_type());
     ASSERT(state_ptr != nullptr, "failed to create aggregate state");
-    aggr_values_.insert(state_ptr);
+    aggr_values_.insert(state_ptr, aggregate_expr->aggregate_type());
     output_chunk_.add_column(make_unique<Column>(aggregate_expr->value_type(), aggregate_expr->value_length()), i);
   }
 }
@@ -43,6 +43,16 @@ AggregateVecPhysicalOperator::AggregateVecPhysicalOperator(vector<Expression *> 
 RC AggregateVecPhysicalOperator::open(Trx *trx)
 {
   ASSERT(children_.size() == 1, "group by operator only support one child, but got %d", children_.size());
+  outputed_ = false;
+  output_chunk_.reset_data();
+  chunk_.reset();
+  aggr_values_.clear();
+  for (Expression *expr : aggregate_expressions_) {
+    auto *aggregate = static_cast<AggregateExpr *>(expr);
+    void *state = create_aggregate_state(aggregate->aggregate_type(), aggregate->child()->value_type());
+    if (!state) return RC::NOMEM;
+    aggr_values_.insert(state, aggregate->aggregate_type());
+  }
 
   PhysicalOperator &child = *children_[0];
   RC                rc    = child.open(trx);
@@ -54,7 +64,8 @@ RC AggregateVecPhysicalOperator::open(Trx *trx)
   while (OB_SUCC(rc = child.next(chunk_))) {
     for (size_t aggr_idx = 0; aggr_idx < aggregate_expressions_.size(); aggr_idx++) {
       Column column;
-      value_expressions_[aggr_idx]->get_column(chunk_, column);
+      rc = value_expressions_[aggr_idx]->get_column(chunk_, column);
+      if (rc != RC::SUCCESS) return rc;
       ASSERT(aggregate_expressions_[aggr_idx]->type() == ExprType::AGGREGATION, "expect aggregate expression");
       auto *aggregate_expr = static_cast<AggregateExpr *>(aggregate_expressions_[aggr_idx]);
       rc = aggregate_state_update_by_column(aggr_values_.at(aggr_idx), aggregate_expr->aggregate_type(), aggregate_expr->child()->value_type(), column);

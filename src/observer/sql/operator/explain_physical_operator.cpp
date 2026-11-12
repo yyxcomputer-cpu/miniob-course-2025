@@ -21,6 +21,7 @@ using namespace std;
 RC ExplainPhysicalOperator::open(Trx *)
 {
   ASSERT(children_.size() == 1, "explain must has 1 child");
+  physical_plan_.clear();
   return RC::SUCCESS;
 }
 
@@ -55,7 +56,8 @@ RC ExplainPhysicalOperator::next(Chunk &chunk)
 
   Value         cell(physical_plan_.c_str());
   auto column = make_unique<Column>();
-  column->init(cell, chunk.rows());
+  chunk.reset();
+  column->init(cell, 1);
   chunk.add_column(std::move(column), 0);
   return RC::SUCCESS;
 }

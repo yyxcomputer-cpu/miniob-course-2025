@@ -47,6 +47,8 @@ void CountState<T>::update(const T *values, int size)
 
 void* create_aggregate_state(AggregateExpr::Type aggr_type, AttrType attr_type)
 {
+  if (aggr_type == AggregateExpr::Type::MIN || aggr_type == AggregateExpr::Type::MAX)
+    return new ExtremumAggregator(aggr_type == AggregateExpr::Type::MIN);
   void* state_ptr = nullptr;
   if (aggr_type == AggregateExpr::Type::SUM) {
     if (attr_type == AttrType::INTS) {
@@ -79,6 +81,9 @@ void* create_aggregate_state(AggregateExpr::Type aggr_type, AttrType attr_type)
 
 RC aggregate_state_update_by_value(void *state, AggregateExpr::Type aggr_type, AttrType attr_type, const Value& val)
 {
+  if (!state) return RC::INVALID_ARGUMENT;
+  if (aggr_type == AggregateExpr::Type::MIN || aggr_type == AggregateExpr::Type::MAX)
+    return static_cast<ExtremumAggregator *>(state)->accumulate(val);
   RC rc = RC::SUCCESS;
   if (aggr_type == AggregateExpr::Type::SUM) {
     if (attr_type == AttrType::INTS) {
@@ -117,6 +122,18 @@ void append_to_column(void *state, Column &column)
 
 RC finialize_aggregate_state(void *state, AggregateExpr::Type aggr_type, AttrType attr_type, Column& col)
 {
+  if (!state) return RC::INVALID_ARGUMENT;
+  if (aggr_type == AggregateExpr::Type::MIN || aggr_type == AggregateExpr::Type::MAX) {
+    Value result;
+    RC rc = static_cast<ExtremumAggregator *>(state)->evaluate(result);
+    if (rc != RC::SUCCESS) return rc;
+    if (result.attr_type() == AttrType::UNDEFINED) {
+      if (attr_type == AttrType::INTS) result.set_int(0);
+      else if (attr_type == AttrType::FLOATS) result.set_float(0);
+      else result.set_string("");
+    }
+    return col.append_value(result);
+  }
   RC rc = RC::SUCCESS;
   if ( aggr_type == AggregateExpr::Type::SUM) {
     if (attr_type == AttrType::INTS) {
@@ -153,34 +170,21 @@ void update_aggregate_state(void *state, const Column &column)
   state_ptr->update(data, column.count());
 }
 
-RC aggregate_state_update_by_column(void *state, AggregateExpr::Type aggr_type, AttrType attr_type, Column& col)
+RC aggregate_state_update_by_column(void *state, AggregateExpr::Type type, AttrType attr_type, Column &column)
 {
-  RC rc = RC::SUCCESS;
-  if (aggr_type == AggregateExpr::Type::SUM) {
-    if (attr_type == AttrType::INTS) {
-      update_aggregate_state<SumState<int>, int>(state, col);
-    } else if (attr_type == AttrType::FLOATS) {
-      update_aggregate_state<SumState<float>, float>(state, col);
-    } else {
-      LOG_WARN("unsupported aggregate value type");
-      rc = RC::UNIMPLEMENTED;
-    }
-  } else if (aggr_type == AggregateExpr::Type::COUNT) {
-    update_aggregate_state<CountState<int>, int>(state, col);
-  } else if (aggr_type == AggregateExpr::Type::AVG) {
-    if (attr_type == AttrType::INTS) {
-      update_aggregate_state<AvgState<int>, int>(state, col);
-    } else if (attr_type == AttrType::FLOATS) {
-      update_aggregate_state<AvgState<float>, float>(state, col);
-    } else {
-      LOG_WARN("unsupported aggregate value type");
-      rc = RC::UNIMPLEMENTED;
-    }
-  } else {
-    LOG_WARN("unsupported aggregator type");
-    rc = RC::UNIMPLEMENTED;
+  // Constant columns store one physical value but represent count() logical rows.
+  for (int i = 0; i < column.count(); ++i) {
+    RC rc = aggregate_state_update_by_value(state, type, attr_type, column.get_value(i));
+    if (rc != RC::SUCCESS) return rc;
   }
-  return rc;
+  return RC::SUCCESS;
+}
+
+void destroy_aggregate_state(void *state, AggregateExpr::Type type)
+{
+  if (type == AggregateExpr::Type::MIN || type == AggregateExpr::Type::MAX)
+    delete static_cast<ExtremumAggregator *>(state);
+  else free(state);
 }
 
 template class SumState<int>;

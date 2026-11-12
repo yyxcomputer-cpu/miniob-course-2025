@@ -423,18 +423,47 @@ bool RecordPageHandler::is_full() const { return page_header_->record_num >= pag
 
 RC PaxRecordPageHandler::insert_record(const char *data, RID *rid)
 {
-  // your code here
-  // Todo:
-  // 1.参考RowRecordPageHandler::insert_record完成大体实现
-  // 2.将一行数据拆分成不同的列插入到不同偏移中
-  // 对应列的偏移可以参照RecordPageHandler::init_empty_page
-  return RC::UNIMPLEMENTED;
+  ASSERT(rw_mode_ != ReadWriteMode::READ_ONLY, "cannot insert into a read-only page");
+  if (is_full()) return RC::RECORD_NOMEM;
+  Bitmap bitmap(bitmap_, page_header_->record_capacity);
+  const int slot = bitmap.next_unsetted_bit(0);
+  const RID target(get_page_num(), slot);
+  RC rc = log_handler_.insert_record(frame_, target, data);
+  if (rc != RC::SUCCESS) return rc;
+  int offset = 0;
+  for (int col = 0; col < page_header_->column_num; ++col) {
+    const int len = get_field_len(col);
+    memcpy(get_field_data(slot, col), data + offset, len);
+    offset += len;
+  }
+  bitmap.set_bit(slot);
+  ++page_header_->record_num;
+  frame_->mark_dirty();
+  if (rid) *rid = target;
+  return RC::SUCCESS;
 }
 
 RC PaxRecordPageHandler::insert_chunk(const Chunk &chunk, int start_row, int &insert_rows)
 {
-  // your code here
-  return RC::UNIMPLEMENTED;
+  insert_rows = 0;
+  if (start_row < 0 || start_row > chunk.rows() || chunk.column_num() != page_header_->column_num)
+    return RC::INVALID_ARGUMENT;
+  vector<char> data(page_header_->record_real_size);
+  for (int row = start_row; row < chunk.rows() && !is_full(); ++row) {
+    int offset = 0;
+    for (int col = 0; col < chunk.column_num(); ++col) {
+      const Column &column = chunk.column(col);
+      const int len = get_field_len(col);
+      if (column.attr_len() != len) return RC::INVALID_ARGUMENT;
+      int index = column.column_type() == Column::Type::CONSTANT_COLUMN ? 0 : row;
+      memcpy(data.data() + offset, column.data() + index * len, len);
+      offset += len;
+    }
+    RC rc = insert_record(data.data(), nullptr);
+    if (rc != RC::SUCCESS) return rc;
+    ++insert_rows;
+  }
+  return RC::SUCCESS;
 }
 
 RC PaxRecordPageHandler::delete_record(const RID *rid)
@@ -463,22 +492,36 @@ RC PaxRecordPageHandler::delete_record(const RID *rid)
 
 RC PaxRecordPageHandler::get_record(const RID &rid, Record &record)
 {
-  // your code here
-  // Todo:
-  // 1.参考RowRecordPageHandler::get_record完成大体实现
-  // 2.通过列的偏移拼接出完整的行数据
-  // 可以参照PaxRecordPageHandler::insert_record的实现
-  return RC::UNIMPLEMENTED;
+  if (rid.slot_num < 0 || rid.slot_num >= page_header_->record_capacity) return RC::RECORD_INVALID_RID;
+  Bitmap bitmap(bitmap_, page_header_->record_capacity);
+  if (!bitmap.get_bit(rid.slot_num)) return RC::RECORD_NOT_EXIST;
+  RC rc = record.new_record(page_header_->record_real_size);
+  if (rc != RC::SUCCESS) return rc;
+  int offset = 0;
+  for (int col = 0; col < page_header_->column_num; ++col) {
+    const int len = get_field_len(col);
+    memcpy(record.data() + offset, get_field_data(rid.slot_num, col), len);
+    offset += len;
+  }
+  record.set_rid(rid);
+  return RC::SUCCESS;
 }
 
 // TODO: specify the column_ids that chunk needed. currenly we get all columns
 RC PaxRecordPageHandler::get_chunk(Chunk &chunk)
 {
-  // your code here
-  // Todo:
-  // 参照PaxRecordPageHandler::get_record
-  // 一次性获得一个page的所有record
-  return RC::UNIMPLEMENTED;
+  chunk.reset_data();
+  Bitmap bitmap(bitmap_, page_header_->record_capacity);
+  for (int c = 0; c < chunk.column_num(); ++c) {
+    const int col_id = chunk.column_ids(c);
+    if (col_id < 0 || col_id >= page_header_->column_num ||
+        chunk.column(c).attr_len() != get_field_len(col_id)) return RC::INVALID_ARGUMENT;
+    for (int slot = bitmap.next_setted_bit(0); slot >= 0; slot = bitmap.next_setted_bit(slot + 1)) {
+      RC rc = chunk.column(c).append_one(get_field_data(slot, col_id));
+      if (rc != RC::SUCCESS) return rc;
+    }
+  }
+  return RC::SUCCESS;
 }
 
 char *PaxRecordPageHandler::get_field_data(SlotNum slot_num, int col_id)
@@ -633,8 +676,22 @@ RC RecordFileHandler::insert_record(const char *data, int record_size, RID *rid)
 
 RC RecordFileHandler::insert_chunk(const Chunk &chunk, int record_size)
 {
-  // your code here
-  return RC::UNIMPLEMENTED;
+  if (chunk.column_num() != table_meta_->field_num()) return RC::INVALID_ARGUMENT;
+  vector<char> data(record_size);
+  for (int row = 0; row < chunk.rows(); ++row) {
+    memset(data.data(), 0, data.size());
+    for (int col = 0; col < chunk.column_num(); ++col) {
+      const FieldMeta *field = table_meta_->field(col);
+      if (chunk.column(col).attr_type() != field->type() || chunk.column(col).attr_len() != field->len())
+        return RC::INVALID_ARGUMENT;
+      const Column &column = chunk.column(col);
+      const int index = column.column_type() == Column::Type::CONSTANT_COLUMN ? 0 : row;
+      memcpy(data.data() + field->offset(), column.data() + index * field->len(), field->len());
+    }
+    RC rc = insert_record(data.data(), record_size, nullptr);
+    if (rc != RC::SUCCESS) return rc;
+  }
+  return RC::SUCCESS;
 }
 
 RC RecordFileHandler::recover_insert_record(const char *data, int record_size, const RID &rid)

@@ -48,7 +48,7 @@ RC insert_record_from_file(
   const int field_num     = record_values.size();
   const int sys_field_num = table->table_meta().sys_field_num();
 
-  if (file_values.size() < record_values.size()) {
+  if (file_values.size() != record_values.size()) {
     return RC::SCHEMA_FIELD_MISSING;
   }
 
@@ -105,22 +105,42 @@ void LoadDataExecutor::load_data(Table *table, const char *file_name, char termi
   vector<Value>       record_values(field_num);
   string              line;
   vector<string> file_values;
-  const string        delim("|");
+
   int                      line_num        = 0;
   int                      insertion_count = 0;
   RC                       rc              = RC::SUCCESS;
-  while (!fs.eof() && RC::SUCCESS == rc) {
-    getline(fs, line);
+  while (RC::SUCCESS == rc && getline(fs, line)) {
     line_num++;
     if (common::is_blank(line.c_str())) {
       continue;
     }
 
     file_values.clear();
-    common::split_string(line, delim, file_values);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    string field;
+    bool quoted = false, quote_closed = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+      const char c = line[i];
+      if (quoted) {
+        if (c == enclosed) {
+          if (i + 1 < line.size() && line[i + 1] == enclosed) { field += c; ++i; }
+          else { quoted = false; quote_closed = true; }
+        } else field += c;
+      } else if (c == terminated) {
+        file_values.push_back(field); field.clear(); quote_closed = false;
+      } else if (c == enclosed && field.empty() && !quote_closed) {
+        quoted = true;
+      } else if (quote_closed) {
+        rc = RC::INVALID_ARGUMENT; break;
+      } else field += c;
+    }
+    if (quoted) rc = RC::INVALID_ARGUMENT;
+    if (rc != RC::SUCCESS) break;
+    file_values.push_back(field);
     stringstream errmsg;
 
-    if (table->table_meta().storage_format() == StorageFormat::ROW_FORMAT) {
+    if (table->table_meta().storage_format() == StorageFormat::ROW_FORMAT ||
+        table->table_meta().storage_format() == StorageFormat::PAX_FORMAT) {
       rc = insert_record_from_file(table, file_values, record_values, errmsg);
       if (rc != RC::SUCCESS) {
         result_string << "Line:" << line_num << " insert record failed:" << errmsg.str() << ". error:" << strrc(rc)
@@ -128,10 +148,6 @@ void LoadDataExecutor::load_data(Table *table, const char *file_name, char termi
       } else {
         insertion_count++;
       }
-    } else if (table->table_meta().storage_format() == StorageFormat::PAX_FORMAT) {
-      // your code here
-      // Todo: 参照insert_record_from_file实现
-      rc = RC::UNIMPLEMENTED;
     } else {
       rc = RC::UNSUPPORTED;
       result_string << "Unsupported storage format: " << strrc(rc) << endl;
@@ -144,6 +160,11 @@ void LoadDataExecutor::load_data(Table *table, const char *file_name, char termi
   if (RC::SUCCESS == rc) {
     result_string << strrc(rc);
   }
-  LOG_INFO("load data done. row num: %s, result: %s", insertion_count, strrc(rc));
-  sql_result->set_return_code(RC::SUCCESS);
+  LOG_INFO("load data done. row num: %d, result: %s", insertion_count, strrc(rc));
+  sql_result->set_return_code(rc);
+  if (rc != RC::SUCCESS) {
+    result_string << "Load stopped at line " << line_num << "; inserted " << insertion_count << " rows. ";
+    result_string << strrc(rc);
+    sql_result->set_state_string(result_string.str());
+  }
 }

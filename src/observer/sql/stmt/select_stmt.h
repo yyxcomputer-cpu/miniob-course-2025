@@ -44,10 +44,16 @@ public:
 
   vector<unique_ptr<Expression>> &query_expressions() { return query_expressions_; }
   vector<unique_ptr<Expression>> &group_by() { return group_by_; }
+  vector<OrderBySqlNode> &order_by() { return order_by_; }
+  int limit() const { return limit_; }
+  int offset() const { return offset_; }
 
 private:
   vector<unique_ptr<Expression>> query_expressions_;
   vector<Table *>                tables_;
   FilterStmt                    *filter_stmt_ = nullptr;
   vector<unique_ptr<Expression>> group_by_;
+  vector<OrderBySqlNode> order_by_;
+  int limit_ = -1;
+  int offset_ = 0;
 };

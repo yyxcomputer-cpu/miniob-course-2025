@@ -1,0 +1,24 @@
+-- Run in a fresh database. One SQL statement per line.
+create table course_student(id int, class_id int, score float, name char(20));
+insert into course_student values(1,1,91.5,'Alice');
+insert into course_student values(2,1,88.0,'Bob');
+insert into course_student values(3,2,95.0,'Carol');
+insert into course_student values(4,2,91.5,'David');
+insert into course_student values(5,1,91.5,'Eve');
+select * from course_student order by score desc,id;
+select name from course_student order by score desc,id limit 2 offset 1;
+select class_id,count(*),avg(score),min(score),max(score),sum(score) from course_student group by class_id order by avg(score) desc;
+create table course_class(class_id int, title char(20));
+insert into course_class values(1,'ClassA');
+insert into course_class values(2,'ClassB');
+set hash_join=1;
+explain select * from course_student inner join course_class on course_student.class_id=course_class.class_id;
+select course_student.name,course_class.title from course_student inner join course_class on course_student.class_id=course_class.class_id order by course_student.id;
+set execution_mode='chunk_iterator';
+create table course_pax(id int,score float) storage format=pax;
+insert into course_pax values(3,82.0);
+insert into course_pax values(1,96.5);
+insert into course_pax values(2,90.0);
+select * from course_pax order by score desc limit 2;
+select count(*),avg(score),max(score) from course_pax;
+explain select * from course_pax order by score desc limit 2;

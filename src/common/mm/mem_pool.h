@@ -25,7 +25,12 @@ See the Mulan PSL v2 for more details. */
 #include "common/log/log.h"
 #include "common/os/os.h"
 
+#ifdef ENABLE_ASAN
 #include <sanitizer/asan_interface.h>
+#else
+#define ASAN_POISON_MEMORY_REGION(addr, size) ((void)0)
+#define ASAN_UNPOISON_MEMORY_REGION(addr, size) ((void)0)
+#endif
 
 namespace common {
 

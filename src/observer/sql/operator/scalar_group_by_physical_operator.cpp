@@ -82,6 +82,12 @@ RC ScalarGroupByPhysicalOperator::open(Trx *trx)
     return rc;
   }
 
+  // Scalar aggregation always produces one group, including an empty input.
+  if (!group_value_) {
+    AggregatorList aggregators;
+    create_aggregator_list(aggregators);
+    group_value_ = make_unique<GroupValueType>(std::move(aggregators), CompositeTuple{});
+  }
   // 得到最终聚合后的值
   if (group_value_) {
     rc = evaluate(*group_value_);

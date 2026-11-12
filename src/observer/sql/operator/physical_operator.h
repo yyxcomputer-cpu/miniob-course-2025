@@ -53,6 +53,10 @@ enum class PhysicalOperatorType
   GROUP_BY_VEC,
   AGGREGATE_VEC,
   EXPR_VEC,
+  ORDER_BY,
+  ORDER_BY_VEC,
+  LIMIT,
+  LIMIT_VEC,
 };
 
 /**

@@ -86,12 +86,27 @@ struct ConditionSqlNode
  * 甚至可以包含复杂的表达式。
  */
 
+struct RelationListSqlNode
+{
+  vector<string> relations;
+  vector<ConditionSqlNode> conditions;
+};
+
+struct OrderBySqlNode
+{
+  unique_ptr<Expression> expression;
+  bool ascending = true;
+};
+
 struct SelectSqlNode
 {
   vector<unique_ptr<Expression>> expressions;  ///< 查询的表达式
   vector<string>                 relations;    ///< 查询的表
   vector<ConditionSqlNode>       conditions;   ///< 查询条件，使用AND串联起来多个条件
   vector<unique_ptr<Expression>> group_by;     ///< group by clause
+  vector<OrderBySqlNode> order_by;
+  int limit = -1;  ///< -1 means unlimited
+  int offset = 0;
 };
 
 /**

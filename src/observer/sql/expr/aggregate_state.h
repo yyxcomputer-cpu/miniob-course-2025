@@ -8,6 +8,7 @@ EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
+#pragma once
 #include "sql/expr/expression.h"
 #include "common/type/attr_type.h"
 template <class T>
@@ -45,7 +46,7 @@ class AvgState
 {
 public:
   AvgState() : value(0), count(0) {}
-  T    value;
+  double value;
   int  count = 0;
   void update(const T *values, int size);
   void update(const T &value)
@@ -56,9 +57,11 @@ public:
   template <class U>
   U finalize()
   {
-    return (U)((float)value / (float)count);
+    return count ? (U)(value / count) : U(0);
   }
 };
+
+void destroy_aggregate_state(void *state, AggregateExpr::Type type);
 
 void *create_aggregate_state(AggregateExpr::Type aggr_type, AttrType attr_type);
 

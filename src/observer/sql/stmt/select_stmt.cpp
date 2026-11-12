@@ -82,6 +82,26 @@ RC SelectStmt::create(Db *db, SelectSqlNode &select_sql, Stmt *&stmt)
     }
   }
 
+  if (select_sql.limit < -1 || select_sql.offset < 0) {
+    return RC::INVALID_ARGUMENT;
+  }
+  vector<OrderBySqlNode> order_by;
+  for (auto &item : select_sql.order_by) {
+    if (item.expression->type() == ExprType::STAR) {
+      return RC::INVALID_ARGUMENT;
+    }
+    vector<unique_ptr<Expression>> bound;
+    RC rc = expression_binder.bind_expression(item.expression, bound);
+    if (rc != RC::SUCCESS || bound.size() != 1) {
+      return rc == RC::SUCCESS ? RC::INVALID_ARGUMENT : rc;
+    }
+    if (bound[0]->value_type() != AttrType::INTS && bound[0]->value_type() != AttrType::FLOATS &&
+        bound[0]->value_type() != AttrType::CHARS) {
+      return RC::UNSUPPORTED;
+    }
+    order_by.push_back({std::move(bound[0]), item.ascending});
+  }
+
   Table *default_table = nullptr;
   if (tables.size() == 1) {
     default_table = tables[0];
@@ -107,6 +127,9 @@ RC SelectStmt::create(Db *db, SelectSqlNode &select_sql, Stmt *&stmt)
   select_stmt->query_expressions_.swap(bound_expressions);
   select_stmt->filter_stmt_ = filter_stmt;
   select_stmt->group_by_.swap(group_by_expressions);
+  select_stmt->order_by_.swap(order_by);
+  select_stmt->limit_ = select_sql.limit;
+  select_stmt->offset_ = select_sql.offset;
   stmt                      = select_stmt;
   return RC::SUCCESS;
 }

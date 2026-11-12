@@ -15,6 +15,7 @@ See the Mulan PSL v2 for more details. */
 #include "common/math/simd_util.h"
 #include "common/sys/rc.h"
 #include "sql/expr/expression.h"
+#include "sql/expr/aggregate_state.h"
 
 /**
  * @brief 用于hash group by 的哈希表实现，不支持并发访问。
@@ -86,15 +87,14 @@ public:
       ASSERT(expr->type() == ExprType::AGGREGATION, "expect aggregate expression");
       auto *aggregation_expr = static_cast<AggregateExpr *>(expr);
       aggr_types_.push_back(aggregation_expr->aggregate_type());
-      aggr_child_types_.push_back(aggregation_expr->value_type());
+      aggr_child_types_.push_back(aggregation_expr->child()->value_type());
     }
   }
   virtual ~StandardAggregateHashTable()
   {
     for (auto &aggr : aggr_values_) {
-      for (auto &state : aggr.second) {
-        free(state);
-      }
+      for (size_t i = 0; i < aggr.second.size(); ++i)
+        destroy_aggregate_state(aggr.second[i], aggr_types_[i]);
     }
   }
 

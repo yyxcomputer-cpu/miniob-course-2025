@@ -34,3 +34,34 @@ RC SumAggregator::evaluate(Value& result)
   result = value_;
   return RC::SUCCESS;
 }
+
+RC AvgAggregator::accumulate(const Value &value)
+{
+  if (value.attr_type() == AttrType::INTS) sum_ += value.get_int();
+  else if (value.attr_type() == AttrType::FLOATS) sum_ += value.get_float();
+  else return RC::INVALID_ARGUMENT;
+  ++count_;
+  return RC::SUCCESS;
+}
+
+RC AvgAggregator::evaluate(Value &result)
+{
+  result.set_float(count_ ? float(sum_ / count_) : 0.0f);
+  return RC::SUCCESS;
+}
+
+RC ExtremumAggregator::accumulate(const Value &value)
+{
+  int comparison = 0;
+  if (value_.attr_type() != AttrType::UNDEFINED) {
+    if (value.attr_type() == AttrType::INTS) {
+      const int a = value.get_int(), b = value_.get_int();
+      comparison = (a > b) - (a < b);
+    } else if (value.attr_type() == AttrType::FLOATS) {
+      const float a = value.get_float(), b = value_.get_float();
+      comparison = (a > b) - (a < b);
+    } else comparison = value.compare(value_);
+  }
+  if (value_.attr_type() == AttrType::UNDEFINED || (minimum_ ? comparison < 0 : comparison > 0)) value_ = value;
+  return RC::SUCCESS;
+}

@@ -56,7 +56,12 @@ RC OptimizeStage::handle_request(SQLStageEvent *sql_event)
   Optimizer optimizer;
   // TODO: error handle
   unique_ptr<PhysicalOperator> physical_operator;
-  if (sql_event->session_event()->session()->use_cascade()) {
+  function<bool(LogicalOperator &)> needs_regular_plan = [&](LogicalOperator &node) {
+    if (node.type() == LogicalOperatorType::ORDER_BY || node.type() == LogicalOperatorType::LIMIT) return true;
+    for (auto &child : node.children()) if (needs_regular_plan(*child)) return true;
+    return false;
+  };
+  if (sql_event->session_event()->session()->use_cascade() && !needs_regular_plan(*logical_operator)) {
     physical_operator = optimizer.optimize(logical_operator.get());
     if (!physical_operator) {
       rc = RC::INTERNAL;

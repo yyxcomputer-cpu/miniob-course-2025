@@ -15,7 +15,7 @@ See the Mulan PSL v2 for more details. */
 
 RC StandardAggregateHashTable::add_chunk(Chunk &groups_chunk, Chunk &aggrs_chunk)
 {
-    if (groups_chunk.rows() != aggrs_chunk.rows()) {
+    if (!aggr_types_.empty() && groups_chunk.rows() != aggrs_chunk.rows()) {
     LOG_WARN("groups_chunk and aggrs_chunk have different rows: %d, %d", groups_chunk.rows(), aggrs_chunk.rows());
     return RC::INVALID_ARGUMENT;
   }
@@ -96,7 +96,11 @@ size_t StandardAggregateHashTable::VectorHash::operator()(const vector<Value> &v
 {
   size_t hash_val = 0;
   for (const auto &elem : vec) {
-    hash_val ^= hash<string>()(elem.to_string());
+    size_t value_hash;
+    if (elem.attr_type() == AttrType::INTS) value_hash = hash<int>()(elem.get_int());
+    else if (elem.attr_type() == AttrType::FLOATS) value_hash = hash<float>()(elem.get_float());
+    else value_hash = hash<string>()(elem.get_string());
+    hash_val ^= value_hash + 0x9e3779b9 + (hash_val << 6) + (hash_val >> 2);
   }
   return hash_val;
 }
@@ -107,9 +111,12 @@ bool StandardAggregateHashTable::VectorEqual::operator()(const vector<Value> &lh
     return false;
   }
   for (size_t i = 0; i < lhs.size(); ++i) {
-    if (rhs[i].compare(lhs[i]) != 0) {
-      return false;
-    }
+    if (lhs[i].attr_type() != rhs[i].attr_type()) return false;
+    if (lhs[i].attr_type() == AttrType::INTS) {
+      if (lhs[i].get_int() != rhs[i].get_int()) return false;
+    } else if (lhs[i].attr_type() == AttrType::FLOATS) {
+      if (lhs[i].get_float() != rhs[i].get_float()) return false;
+    } else if (lhs[i].get_string() != rhs[i].get_string()) return false;
   }
   return true;
 }
